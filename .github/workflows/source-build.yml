@@ -90,6 +90,14 @@ jobs:
           done
           echo "=== utsrelease"
           cat include/generated/utsrelease.h 2>/dev/null || true
+          echo "=== olddefconfig 对真机 config 的改动（关键！）"
+          python3 scripts/diffconfig "$GITHUB_WORKSPACE/kernel-real.config" .config 2>&1 | head -80 || true
+          echo "=== struct module 相关项复核"
+          for k in CONFIG_MODULE_UNLOAD CONFIG_KALLSYMS CONFIG_KALLSYMS_ALL CONFIG_TRACEPOINTS \
+                   CONFIG_EVENT_TRACING CONFIG_JUMP_LABEL CONFIG_LIVEPATCH CONFIG_MODULE_SIG \
+                   CONFIG_MODULE_UNLOAD_TAINT_TRACKING CONFIG_FUNCTION_TRACER; do
+            printf '  %-42s ' "$k"; grep -h "^#define $k " include/generated/autoconf.h 2>/dev/null || echo "(未定义)"
+          done
 
       - name: 手工 kbuild 编模块
         run: |
