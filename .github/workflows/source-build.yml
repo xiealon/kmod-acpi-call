@@ -79,16 +79,8 @@ jobs:
           set -u
           SRC="$GITHUB_WORKSPACE/src"
           cd "$LINUX"
-          echo "=== 基底 x86_64_defconfig"
+          echo "=== 基底 x86_64_defconfig（它的 struct module = 1216，与真机一致）"
           make ARCH=x86_64 defconfig 2>&1 | tail -3
-          cp .config /tmp/k.base
-          echo "  基底项数 $(grep -cE '^CONFIG_[A-Za-z0-9_]+=' /tmp/k.base)"
-          echo "=== 官方增量追加覆盖（后出现的同名项生效）"
-          cat "$SRC/target/linux/generic/config-6.12" \
-              "$SRC/target/linux/x86/config-6.12" \
-              "$SRC/target/linux/x86/64/config-6.12" >> /tmp/k.base
-          echo "  拼接后行数 $(wc -l < /tmp/k.base)"
-          cp /tmp/k.base .config
           echo "=== olddefconfig 补齐"
           make ARCH=x86_64 olddefconfig 2>&1 | tail -10
           echo "=== modules_prepare"

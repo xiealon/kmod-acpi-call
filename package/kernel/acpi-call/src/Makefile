@@ -1,8 +1,8 @@
-# 真机内核 6.12.103 没有导出 __x86_return_thunk（RETHUNK 未启用），
-# 但内核 defconfig 打开了它，编出来的模块会引用该符号导致 insmod 失败。
-# 这里剔除 kbuild 注入的 thunk 标志，让函数返回走普通 ret。
+# 真机 ko 用 __mcount_loc，不用 __patchable_function_entries（256 个官方 ko 里 0 个带后者）。
+# 这里用编译标志直接屏蔽，避免依赖 config 开关。
 KBUILD_CFLAGS := $(filter-out -mfunction-return=thunk-extern,$(KBUILD_CFLAGS))
 KBUILD_CFLAGS := $(filter-out -mindirect-branch=thunk-extern,$(KBUILD_CFLAGS))
 ccflags-y += -mfunction-return=keep -mindirect-branch=keep
+ccflags-y += -fno-patchable-function-entry
 
 obj-m += acpi_call.o
