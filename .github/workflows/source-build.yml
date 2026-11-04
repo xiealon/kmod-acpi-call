@@ -77,25 +77,39 @@ jobs:
       - name: 生成内核配置
         run: |
           set -u
+          SRC="$GITHUB_WORKSPACE/src"
           cd "$LINUX"
-          if [ ! -f .config ]; then
-            echo "=== 用内核 x86_64_defconfig 作基底（它给出的 struct module 是 1216，与真机一致）"
-            make ARCH=x86_64 defconfig 2>&1 | tail -5
+          echo "=== 基底 x86_64_defconfig"
+          make ARCH=x86_64 defconfig 2>&1 | tail -3
+          cp .config /tmp/k.base
+          echo "=== OpenWrt 官方增量配置（真机内核就是这套生成的）"
+          cat "$SRC/target/linux/generic/config-6.12" \
+              "$SRC/target/linux/x86/config-6.12" \
+              "$SRC/target/linux/x86/64/config-6.12" > /tmp/k.inc
+          echo "  增量行数 $(wc -l < /tmp/k.inc)"
+          echo "=== kconfig.pl 合并"
+          perl "$SRC/scripts/kconfig.pl" '+' /tmp/k.base /tmp/k.inc > /tmp/k.merged 2>/tmp/k.err
+          echo "  perl rc=$?"
+          head -5 /tmp/k.err 2>/dev/null || true
+          N=$(grep -cE '^CONFIG_[A-Za-z0-9_]+=' /tmp/k.merged || true)
+          echo "  合并后项数 $N"
+          if [ "${N:-0}" -lt 3000 ]; then
+            echo "::warning::kconfig.pl 结果异常，退回 defconfig"
+            cp /tmp/k.base .config
+          else
+            cp /tmp/k.merged .config
           fi
-          echo "=== 精简：去掉模块里真机内核不支持的段（jump label / patchable entry / ORC）"
-          ./scripts/config --file .config \
-            -d JUMP_LABEL -d FUNCTION_TRACER -d UNWINDER_ORC \
-            -e UNWINDER_FRAME_POINTER 2>&1 | tail -3 || true
           echo "=== olddefconfig"
           make ARCH=x86_64 olddefconfig 2>&1 | tail -10
           echo "=== modules_prepare"
-          make ARCH=x86_64 modules_prepare -j"$(nproc)" 2>&1 | tail -20
+          make ARCH=x86_64 modules_prepare -j"$(nproc)" 2>&1 | tail -15
           echo "=== 项数: $(grep -cE '^CONFIG_[A-Za-z0-9_]+=' .config)"
           echo "=== autoconf 关键项"
           for k in CONFIG_MITIGATION_RETHUNK CONFIG_MITIGATION_SLS CONFIG_X86_KERNEL_IBT \
-                   CONFIG_FUNCTION_TRACER CONFIG_FTRACE_MCOUNT_RECORD CONFIG_MODULE_UNLOAD \
+                   CONFIG_JUMP_LABEL CONFIG_FUNCTION_TRACER CONFIG_FTRACE_MCOUNT_RECORD \
+                   CONFIG_HAVE_PATCHABLE_FUNCTION_ENTRY CONFIG_MODULE_UNLOAD \
                    CONFIG_DEBUG_INFO_BTF_MODULES CONFIG_MODVERSIONS CONFIG_MITIGATION_RETPOLINE; do
-            printf '  %-42s ' "$k"
+            printf '  %-46s ' "$k"
             grep -h "^#define $k " include/generated/autoconf.h 2>/dev/null || echo "(未定义)"
           done
           echo "=== utsrelease"
