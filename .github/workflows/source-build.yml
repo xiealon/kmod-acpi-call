@@ -66,8 +66,8 @@ jobs:
             find build_dir -maxdepth 3 -type d | head -30
             exit 1
           fi
-          echo "LINUX=${LINUX%/}" >> "$GITHUB_ENV"
-          echo "内核源码: $LINUX"
+          echo "LINUX=$(pwd)/${LINUX%/}" >> "$GITHUB_ENV"
+          echo "内核源码: $(pwd)/${LINUX%/}"
           echo "=== Kconfig 检查（SDK 就是缺这个）"
           ls -l "$LINUX/Kconfig" || echo "缺 Kconfig"
           find "$LINUX" -maxdepth 1 -name 'Kconfig*' | head
