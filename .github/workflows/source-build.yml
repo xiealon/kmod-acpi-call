@@ -1,0 +1,127 @@
+name: build kmod-acpi-call (source tree)
+
+# 不再用 SDK。改用 immortalwrt-src @ v25.12.2 完整源码树：
+#   SDK 里的内核树缺 Kconfig、且 config 与真机不同（FUNCTION_TRACER 未开），
+#   用它编出的模块在真机上 insmod 报 Invalid relocation target。
+#
+# 这里把内核 .config 换成真机 /proc/config.gz（kernel-real.config），
+# 用 olddefconfig + modules_prepare 生成匹配的 autoconf.h，再手工 kbuild。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'package/kernel/acpi-call/**'
+      - 'kernel-real.config'
+      - '.github/workflows/source-build.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: src-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: 环境准备
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential libncurses-dev rsync gawk gettext unzip file wget \
+            bc libelf-dev libssl-dev flex bison python3 zstd git
+
+      - name: 拉取源码树 v25.12.2
+        run: |
+          set -eu
+          cd "$GITHUB_WORKSPACE"
+          git clone --depth 1 --branch v25.12.2 \
+            https://github.com/xiealon/immortalwrt-src.git src
+          cd src
+          git log --oneline -1
+          ls | head -20
+
+      - name: 生成 .config
+        run: |
+          set -eu
+          cd "$GITHUB_WORKSPACE/src"
+          cp -v "$GITHUB_WORKSPACE/config.buildinfo" .config
+          [ -f feeds.conf ] || cp feeds.conf.default feeds.conf 2>/dev/null || true
+          make defconfig 2>&1 | tail -10
+          grep -E 'CONFIG_TARGET_x86|CONFIG_TARGET_SUBTARGET' .config
+
+      - name: 准备内核源码
+        run: |
+          set -u
+          cd "$GITHUB_WORKSPACE/src"
+          make target/linux/prepare V=s -j"$(nproc)" 2>&1 | tail -40
+          LINUX=$(ls -d build_dir/target-*/linux-*/linux-*/ 2>/dev/null | head -n1)
+          if [ -z "$LINUX" ]; then
+            echo "::error::没有拿到内核源码"
+            find build_dir -maxdepth 3 -type d | head -30
+            exit 1
+          fi
+          echo "LINUX=${LINUX%/}" >> "$GITHUB_ENV"
+          echo "内核源码: $LINUX"
+          echo "=== Kconfig 检查（SDK 就是缺这个）"
+          ls -l "$LINUX/Kconfig" || echo "缺 Kconfig"
+          find "$LINUX" -maxdepth 1 -name 'Kconfig*' | head
+          echo "=== 源码内部 Kconfig 数量"
+          find "$LINUX" -name 'Kconfig*' | wc -l
+
+      - name: 换真机 config 并生成 autoconf
+        run: |
+          set -u
+          cd "$LINUX"
+          cp -v "$GITHUB_WORKSPACE/kernel-real.config" .config
+          echo "=== 真机 config $(wc -l < .config) 行"
+          make ARCH=x86_64 olddefconfig 2>&1 | tail -15
+          make ARCH=x86_64 modules_prepare -j"$(nproc)" 2>&1 | tail -25
+          echo "=== autoconf 关键项"
+          for k in CONFIG_FUNCTION_TRACER CONFIG_DYNAMIC_FTRACE_WITH_REGS \
+                   CONFIG_DEBUG_INFO_BTF_MODULES CONFIG_SMP CONFIG_PREEMPT_NONE \
+                   CONFIG_MODVERSIONS CONFIG_X86_KERNEL_IBT; do
+            printf '  %-38s ' "$k"; grep -h "^#define $k " include/generated/autoconf.h 2>/dev/null || echo "(未定义)"
+          done
+          echo "=== utsrelease"
+          cat include/generated/utsrelease.h 2>/dev/null || true
+
+      - name: 手工 kbuild 编模块
+        run: |
+          set -u
+          cd "$GITHUB_WORKSPACE/package/kernel/acpi-call/src"
+          echo "=== 源码"
+          ls -l
+          make -C "$LINUX" M="$PWD" ARCH=x86_64 V=s modules 2>&1 | tail -60
+          echo "=== 结果"
+          ls -l *.ko 2>/dev/null || echo "没有生成 ko"
+          for k in *.ko; do
+            [ -e "$k" ] || continue
+            modinfo "$k" | grep -E 'vermagic|depends|name' || true
+          done
+
+      - name: 收集产物
+        run: |
+          set -u
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cd "$GITHUB_WORKSPACE/package/kernel/acpi-call/src"
+          cp -v *.ko "$GITHUB_WORKSPACE/out"/ 2>/dev/null || true
+          echo "=== 段表"
+          for k in "$GITHUB_WORKSPACE"/out/*.ko; do
+            [ -e "$k" ] || continue
+            echo "--- $(basename "$k")"
+            readelf -S "$k" | grep -E 'mcount|BTF|debug_info|note.gnu' || true
+          done
+          ls -l "$GITHUB_WORKSPACE/out"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kmod-srcbuilt
+          path: ${{ github.workspace }}/out/*
+          if-no-files-found: warn
