@@ -1,11 +1,22 @@
-name: build kmod-acpi-call (source tree)
+name: build kmod-acpi-call (gcc-14.3.0 toolchain)
 
-# 不再用 SDK。改用 immortalwrt-src @ v25.12.2 完整源码树：
-#   SDK 里的内核树缺 Kconfig、且 config 与真机不同（FUNCTION_TRACER 未开），
-#   用它编出的模块在真机上 insmod 报 Invalid relocation target。
+# 第 20 轮：换编译器。
 #
-# 这里把内核 .config 换成真机 /proc/config.gz（kernel-real.config），
-# 用 olddefconfig + modules_prepare 生成匹配的 autoconf.h，再手工 kbuild。
+# 实测根因：
+#   真机 / IB 内核  = x86_64-openwrt-linux-musl-gcc (OpenWrt GCC 14.3.0 r38135) 14.3.0
+#   之前 19 轮产物  = GCC 11.4.0 (Ubuntu 22.04 runner 自带)
+#   .comment 段实测：out19 = "GCC: (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0"
+#
+# 官方模块（crc-ccitt.ko / cifs_arc4.ko，真机可 insmod）：
+#   this_module 段 1216 B，段内重定位 0 条，.data 仅 4 B
+# 自编模块（out19）：
+#   this_module 段 1216 B，段内重定位 2 条（+0x138 / +0x470，R_X86_64_64）
+#   .data 32 B，含 2 条 R_X86_64_64
+#   → 内核 apply_relocate_add 对 type 1 要求目标位置为 0，于是
+#     "Invalid relocation target, existing value is nonzero"
+#
+# 本 workflow 用 OpenWrt SDK 里的 gcc 14.3.0 交叉工具链，
+# 内核 config 用 IB 里解出来的真 config（8659 行，与真机 /proc/config.gz 仅差 4 个 CGROUP 项）。
 
 on:
   workflow_dispatch:
@@ -13,7 +24,8 @@ on:
     branches: [main]
     paths:
       - 'package/kernel/acpi-call/**'
-      - 'kernel-real.config'
+      - 'ib-kernel.config'
+      - 'config.buildinfo'
       - '.github/workflows/source-build.yml'
 
 permissions:
@@ -23,10 +35,14 @@ concurrency:
   group: src-build
   cancel-in-progress: true
 
+env:
+  SDK_URL: https://downloads.immortalwrt.org/releases/25.12.2/targets/x86/64/immortalwrt-sdk-25.12.2-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+  TC_NAME: toolchain-x86_64_gcc-14.3.0_musl
+
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 300
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v6
 
@@ -36,6 +52,25 @@ jobs:
           sudo apt-get install -y -qq build-essential libncurses-dev rsync gawk gettext unzip file wget \
             bc libelf-dev libssl-dev flex bison python3 zstd git
 
+      - name: 下载并解包 SDK（取 gcc 14.3.0 交叉工具链）
+        run: |
+          set -eu
+          cd "$GITHUB_WORKSPACE"
+          wget -q --timeout=90 --tries=3 -O sdk.tar.zst "$SDK_URL"
+          echo "SDK $(stat -c%s sdk.tar.zst) B"
+          mkdir -p sdk
+          tar --zstd -xf sdk.tar.zst -C sdk
+          SDK=$(echo "$GITHUB_WORKSPACE"/sdk/*/ | head -1)
+          echo "SDK=$SDK" >> "$GITHUB_ENV"
+          ls "$SDK"
+          echo "=== toolchain"
+          ls "$SDK/staging_dir/"
+          TC="$SDK/staging_dir/$TC_NAME/bin"
+          echo "TC=$TC" >> "$GITHUB_ENV"
+          echo "=== 交叉 gcc 版本（必须是 14.3.0）"
+          "$TC/x86_64-openwrt-linux-musl-gcc" --version | head -1
+          "$TC/x86_64-openwrt-linux-musl-ld" --version | head -1
+
       - name: 拉取源码树 v25.12.2
         run: |
           set -eu
@@ -44,22 +79,25 @@ jobs:
             https://github.com/xiealon/immortalwrt-src.git src
           cd src
           git log --oneline -1
-          ls | head -20
 
-      - name: 生成 .config
+      - name: 复用 SDK 的工具链（跳过自编 toolchain）
         run: |
           set -eu
           cd "$GITHUB_WORKSPACE/src"
-          cp -v "$GITHUB_WORKSPACE/config.buildinfo" .config
-          [ -f feeds.conf ] || cp feeds.conf.default feeds.conf 2>/dev/null || true
-          make defconfig 2>&1 | tail -10
-          grep -E 'CONFIG_TARGET_x86|CONFIG_TARGET_SUBTARGET' .config
+          cp -a "$SDK/staging_dir" ./staging_dir 2>/dev/null || true
+          cp -a "$SDK/tmp" ./tmp 2>/dev/null || true
+          ls staging_dir/
+          ls "staging_dir/$TC_NAME/bin" | head -5
 
       - name: 准备内核源码
         run: |
           set -u
           cd "$GITHUB_WORKSPACE/src"
-          make target/linux/prepare V=s -j"$(nproc)" 2>&1 | tail -40
+          cp -v "$GITHUB_WORKSPACE/config.buildinfo" .config
+          [ -f feeds.conf ] || cp feeds.conf.default feeds.conf 2>/dev/null || true
+          make defconfig 2>&1 | tail -5
+          echo "=== 开始 target/linux/prepare"
+          make target/linux/prepare V=s -j"$(nproc)" 2>&1 | tail -30
           LINUX=$(ls -d build_dir/target-*/linux-*/linux-*/ 2>/dev/null | head -n1)
           if [ -z "$LINUX" ]; then
             echo "::error::没有拿到内核源码"
@@ -68,54 +106,73 @@ jobs:
           fi
           echo "LINUX=$(pwd)/${LINUX%/}" >> "$GITHUB_ENV"
           echo "内核源码: $(pwd)/${LINUX%/}"
-          echo "=== Kconfig 检查（SDK 就是缺这个）"
           ls -l "$LINUX/Kconfig" || echo "缺 Kconfig"
-          find "$LINUX" -maxdepth 1 -name 'Kconfig*' | head
-          echo "=== 源码内部 Kconfig 数量"
           find "$LINUX" -name 'Kconfig*' | wc -l
 
-      - name: 生成内核配置
+      - name: 用 IB 真 config 生成内核配置
         run: |
           set -u
-          SRC="$GITHUB_WORKSPACE/src"
           cd "$LINUX"
-          echo "=== 基底 x86_64_defconfig（它的 struct module = 1216，与真机一致）"
-          make ARCH=x86_64 defconfig 2>&1 | tail -3
-          echo "=== olddefconfig 补齐"
+          cp -v "$GITHUB_WORKSPACE/ib-kernel.config" .config
+          echo "=== 输入 config: $(wc -l < .config) 行"
+          export PATH="$TC:$PATH"
+          export CROSS_COMPILE=x86_64-openwrt-linux-musl-
           make ARCH=x86_64 olddefconfig 2>&1 | tail -10
-          echo "=== modules_prepare"
-          make ARCH=x86_64 modules_prepare -j"$(nproc)" 2>&1 | tail -15
-          echo "=== 项数: $(grep -cE '^CONFIG_[A-Za-z0-9_]+=' .config)"
-          echo "=== autoconf 关键项"
-          for k in CONFIG_MITIGATION_RETHUNK CONFIG_MITIGATION_SLS CONFIG_X86_KERNEL_IBT \
-                   CONFIG_JUMP_LABEL CONFIG_FUNCTION_TRACER CONFIG_FTRACE_MCOUNT_RECORD \
-                   CONFIG_FTRACE_MCOUNT_USE_PATCHABLE_FUNCTION_ENTRY \
-                   CONFIG_UNWINDER_ORC CONFIG_UNWINDER_FRAME_POINTER \
-                   CONFIG_TRACEPOINTS CONFIG_EVENT_TRACING CONFIG_KALLSYMS_ALL \
-                   CONFIG_LIVEPATCH CONFIG_MODULE_SIG CONFIG_MODULE_UNLOAD \
-                   CONFIG_DEBUG_INFO_BTF CONFIG_DEBUG_INFO_BTF_MODULES CONFIG_MODVERSIONS; do
-            printf '  %-46s ' "$k"
-            grep -h "^#define $k " include/generated/autoconf.h 2>/dev/null || echo "(未定义)"
-          done
+          echo "=== olddefconfig 后: $(wc -l < .config) 行, $(grep -cE '^CONFIG_[A-Za-z0-9_]+=' .config) 项"
+          make ARCH=x86_64 modules_prepare -j"$(nproc)" 2>&1 | tail -25
           echo "=== utsrelease"
           cat include/generated/utsrelease.h 2>/dev/null || true
+          echo "=== autoconf 关键项"
+          for k in CONFIG_MODULE_UNLOAD CONFIG_MODVERSIONS CONFIG_FUNCTION_TRACER \
+                   CONFIG_FTRACE_MCOUNT_RECORD CONFIG_FTRACE_MCOUNT_USE_PATCHABLE_FUNCTION_ENTRY \
+                   CONFIG_JUMP_LABEL CONFIG_UNWINDER_ORC CONFIG_MITIGATION_RETHUNK \
+                   CONFIG_X86_KERNEL_IBT CONFIG_DEBUG_INFO_BTF_MODULES; do
+            printf '  %-58s ' "$k"
+            grep -h "^#define $k " include/generated/autoconf.h 2>/dev/null || echo "(未定义)"
+          done
+          echo "=== 编译器（内核 Makefile 实际用的）"
+          make ARCH=x86_64 -s kernelrelease >/dev/null 2>&1 || true
+          grep -m2 -E '^CONFIG_CC_VERSION_TEXT|^CONFIG_GCC_VERSION' .config || true
 
-      - name: 手工 kbuild 编模块
+      - name: 用 gcc 14.3.0 编模块
         run: |
           set -u
+          export PATH="$TC:$PATH"
           cd "$GITHUB_WORKSPACE/package/kernel/acpi-call/src"
-          echo "=== 源码"
-          ls -l
-          # modules_prepare 不产生 Module.symvers；本内核 CONFIG_MODVERSIONS 关闭，
-          # 模块加载时按符号名解析，因此放行 modpost 的未定义符号检查。
-          make -C "$LINUX" M="$PWD" ARCH=x86_64 KBUILD_MODPOST_WARN=1 V=s modules 2>&1 | tail -60
+          echo "=== 源码"; ls -l
+          echo "=== 用的编译器"
+          x86_64-openwrt-linux-musl-gcc --version | head -1
+          make -C "$LINUX" M="$PWD" ARCH=x86_64 \
+               CROSS_COMPILE=x86_64-openwrt-linux-musl- \
+               KBUILD_MODPOST_WARN=1 V=s modules 2>&1 | tail -70
           echo "=== 结果"
           ls -l *.ko 2>/dev/null || echo "没有生成 ko"
           for k in *.ko; do
             [ -e "$k" ] || continue
             echo "--- 原始 $(basename "$k") $(stat -c%s "$k") B"
-            strip --strip-debug -o "${k%.ko}.stripped.ko" "$k" && echo "  已 strip-debug -> $(basename "${k%.ko}").stripped.ko $(stat -c%s "${k%.ko}.stripped.ko") B"
+            strip --strip-debug -o "${k%.ko}.stripped.ko" "$k" && echo "  stripped $(stat -c%s "${k%.ko}.stripped.ko") B"
+            echo "  .comment:"; readelf -p .comment "$k" 2>/dev/null | sed -n '2,6p'
             modinfo "$k" | grep -E 'vermagic|depends|name|srcversion' || true
+          done
+
+      - name: 段表与重定位自检（对照真机官方模块）
+        run: |
+          set -u
+          cd "$GITHUB_WORKSPACE/package/kernel/acpi-call/src"
+          for k in *.ko; do
+            [ -e "$k" ] || continue
+            echo "############ $(basename "$k")"
+            echo "--- this_module 段"
+            readelf -SW "$k" | grep -E 'this_module|\.data|\.rodata|\.rela'
+            echo "--- 全部重定位段"
+            readelf -rW "$k" | grep -E '^Relocation section'
+            echo "--- R_X86_64_64 (type 1) 明细"
+            readelf -rW "$k" | awk '/^Relocation section/{sec=$0} /R_X86_64_64/{print sec" | "$0}' | head -20
+            echo "--- 段名里有没有不该出现的"
+            for bad in __patchable_function_entries orc_unwind call_sites __mcount_loc; do
+              printf '  %-34s ' "$bad"
+              readelf -SW "$k" | grep -c "$bad" || true
+            done
           done
 
       - name: 收集产物
@@ -124,18 +181,12 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/out"
           cd "$GITHUB_WORKSPACE/package/kernel/acpi-call/src"
           cp -v *.ko "$GITHUB_WORKSPACE/out"/ 2>/dev/null || true
-          echo "=== 产物清单"
+          cd "$LINUX" && cp -v .config "$GITHUB_WORKSPACE/out/kernel-effective.config" 2>/dev/null || true
           ls -l "$GITHUB_WORKSPACE/out"
-          echo "=== 段表（应与真机模块一致：无 debug_info，有 __mcount_loc）"
-          for k in "$GITHUB_WORKSPACE"/out/*.ko; do
-            [ -e "$k" ] || continue
-            echo "--- $(basename "$k") $(stat -c%s "$k") B"
-            readelf -S "$k" | grep -E 'mcount|BTF|debug_info|note.gnu' || true
-          done
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: kmod-srcbuilt
+          name: kmod-gcc14
           path: ${{ github.workspace }}/out/*
           if-no-files-found: warn
