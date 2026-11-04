@@ -79,11 +79,11 @@ jobs:
           set -u
           SRC="$GITHUB_WORKSPACE/src"
           cd "$LINUX"
-          echo "=== 用 OpenWrt 官方三份配置直接拼成 .config（真机内核就是这套）"
-          cat "$SRC/target/linux/generic/config-6.12" \
-              "$SRC/target/linux/x86/config-6.12" \
-              "$SRC/target/linux/x86/64/config-6.12" > .config
-          echo "  拼接行数 $(wc -l < .config)，项数 $(grep -cE '^CONFIG_[A-Za-z0-9_]+=' .config)"
+          echo "=== 基底 x86_64_defconfig（它给出的 struct module 是 1216，与真机一致）"
+          make ARCH=x86_64 defconfig 2>&1 | tail -3
+          echo "=== 只关 FTRACE_MCOUNT_USE_PATCHABLE_FUNCTION_ENTRY"
+          echo "    真机 ko 用 __mcount_loc（recordmcount），不用 __patchable_function_entries"
+          ./scripts/config --file .config -d FTRACE_MCOUNT_USE_PATCHABLE_FUNCTION_ENTRY 2>&1 | tail -2 || true
           echo "=== olddefconfig 补齐"
           make ARCH=x86_64 olddefconfig 2>&1 | tail -10
           echo "=== modules_prepare"
