@@ -97,12 +97,16 @@ jobs:
           cd "$GITHUB_WORKSPACE/package/kernel/acpi-call/src"
           echo "=== 源码"
           ls -l
-          make -C "$LINUX" M="$PWD" ARCH=x86_64 V=s modules 2>&1 | tail -60
+          # modules_prepare 不产生 Module.symvers；本内核 CONFIG_MODVERSIONS 关闭，
+          # 模块加载时按符号名解析，因此放行 modpost 的未定义符号检查。
+          make -C "$LINUX" M="$PWD" ARCH=x86_64 KBUILD_MODPOST_WARN=1 V=s modules 2>&1 | tail -60
           echo "=== 结果"
           ls -l *.ko 2>/dev/null || echo "没有生成 ko"
           for k in *.ko; do
             [ -e "$k" ] || continue
-            modinfo "$k" | grep -E 'vermagic|depends|name' || true
+            echo "--- 原始 $(basename "$k") $(stat -c%s "$k") B"
+            strip --strip-debug -o "${k%.ko}.stripped.ko" "$k" && echo "  已 strip-debug -> $(basename "${k%.ko}").stripped.ko $(stat -c%s "${k%.ko}.stripped.ko") B"
+            modinfo "$k" | grep -E 'vermagic|depends|name|srcversion' || true
           done
 
       - name: 收集产物
@@ -111,13 +115,14 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/out"
           cd "$GITHUB_WORKSPACE/package/kernel/acpi-call/src"
           cp -v *.ko "$GITHUB_WORKSPACE/out"/ 2>/dev/null || true
-          echo "=== 段表"
+          echo "=== 产物清单"
+          ls -l "$GITHUB_WORKSPACE/out"
+          echo "=== 段表（应与真机模块一致：无 debug_info，有 __mcount_loc）"
           for k in "$GITHUB_WORKSPACE"/out/*.ko; do
             [ -e "$k" ] || continue
-            echo "--- $(basename "$k")"
+            echo "--- $(basename "$k") $(stat -c%s "$k") B"
             readelf -S "$k" | grep -E 'mcount|BTF|debug_info|note.gnu' || true
           done
-          ls -l "$GITHUB_WORKSPACE/out"
 
       - uses: actions/upload-artifact@v4
         if: always()
