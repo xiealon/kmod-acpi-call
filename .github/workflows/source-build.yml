@@ -74,28 +74,26 @@ jobs:
           echo "=== 源码内部 Kconfig 数量"
           find "$LINUX" -name 'Kconfig*' | wc -l
 
-      - name: 合并真机配置并生成 autoconf
+      - name: 生成内核配置
         run: |
           set -u
           cd "$LINUX"
           if [ ! -f .config ]; then
-            echo "::warning::没有 .config，用 kernel defconfig"
+            echo "=== 用内核 x86_64_defconfig 作基底（它给出的 struct module 是 1216，与真机一致）"
             make ARCH=x86_64 defconfig 2>&1 | tail -5
           fi
-          cp .config .config.official
-          echo "=== 官方 config 项数: $(grep -cE '^CONFIG_[A-Za-z0-9_]+=' .config.official)"
-          python3 "$GITHUB_WORKSPACE/tools/merge_config.py" \
-            .config.official "$GITHUB_WORKSPACE/kernel-real.config" .config \
-            '^CONFIG_(MITIGATION_(RETHUNK|SLS|RETPOLINE|RETBLEED|IBRS_ENTRY|IBPB_ENTRY)|RETHUNK|RETPOLINE|X86_KERNEL_IBT|SLS|CPU_UNRET_ENTRY)$'
+          echo "=== 关掉真机内核没开的缓解项（否则模块引用 __x86_return_thunk 会加载失败）"
+          ./scripts/config --file .config \
+            -d MITIGATION_RETHUNK -d MITIGATION_SLS -d X86_KERNEL_IBT 2>&1 | tail -3 || true
           echo "=== olddefconfig"
-          make ARCH=x86_64 olddefconfig 2>&1 | tail -15
+          make ARCH=x86_64 olddefconfig 2>&1 | tail -10
           echo "=== modules_prepare"
           make ARCH=x86_64 modules_prepare -j"$(nproc)" 2>&1 | tail -20
+          echo "=== 项数: $(grep -cE '^CONFIG_[A-Za-z0-9_]+=' .config)"
           echo "=== autoconf 关键项"
           for k in CONFIG_MITIGATION_RETHUNK CONFIG_MITIGATION_SLS CONFIG_X86_KERNEL_IBT \
                    CONFIG_FUNCTION_TRACER CONFIG_FTRACE_MCOUNT_RECORD CONFIG_MODULE_UNLOAD \
-                   CONFIG_DEBUG_INFO_BTF_MODULES CONFIG_MODVERSIONS CONFIG_RETPOLINE \
-                   CONFIG_MITIGATION_RETPOLINE; do
+                   CONFIG_DEBUG_INFO_BTF_MODULES CONFIG_MODVERSIONS CONFIG_MITIGATION_RETPOLINE; do
             printf '  %-42s ' "$k"
             grep -h "^#define $k " include/generated/autoconf.h 2>/dev/null || echo "(未定义)"
           done
