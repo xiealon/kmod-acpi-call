@@ -74,30 +74,26 @@ jobs:
           echo "=== 源码内部 Kconfig 数量"
           find "$LINUX" -name 'Kconfig*' | wc -l
 
-      - name: 换真机 config 并生成 autoconf
+      - name: 使用 OpenWrt 生成的内核配置
         run: |
           set -u
           cd "$LINUX"
-          cp -v "$GITHUB_WORKSPACE/kernel-real.config" .config
-          echo "=== 真机 config $(wc -l < .config) 行"
-          make ARCH=x86_64 olddefconfig 2>&1 | tail -15
-          make ARCH=x86_64 modules_prepare -j"$(nproc)" 2>&1 | tail -25
-          echo "=== autoconf 关键项"
-          for k in CONFIG_FUNCTION_TRACER CONFIG_DYNAMIC_FTRACE_WITH_REGS \
-                   CONFIG_DEBUG_INFO_BTF_MODULES CONFIG_SMP CONFIG_PREEMPT_NONE \
-                   CONFIG_MODVERSIONS CONFIG_X86_KERNEL_IBT; do
-            printf '  %-38s ' "$k"; grep -h "^#define $k " include/generated/autoconf.h 2>/dev/null || echo "(未定义)"
+          echo "=== prepare 阶段留下的内核 .config"
+          if [ ! -f .config ]; then
+            echo "::warning::没有 .config，用 kernel defconfig"
+            make ARCH=x86_64 defconfig 2>&1 | tail -5
+          fi
+          echo "=== 项数：$(grep -cE '^CONFIG_|^# CONFIG_' .config)"
+          echo "=== 结构性选项"
+          for k in CONFIG_MODULE_UNLOAD CONFIG_KALLSYMS CONFIG_TRACEPOINTS CONFIG_EVENT_TRACING \
+                   CONFIG_JUMP_LABEL CONFIG_LIVEPATCH CONFIG_MODULE_SIG CONFIG_FUNCTION_TRACER \
+                   CONFIG_FTRACE_MCOUNT_RECORD CONFIG_DEBUG_INFO_BTF CONFIG_DEBUG_INFO_BTF_MODULES; do
+            printf '  %-40s ' "$k"; grep -E "^(# )?$k[= ]" .config | head -1
           done
+          echo "=== modules_prepare"
+          make ARCH=x86_64 modules_prepare -j"$(nproc)" 2>&1 | tail -25
           echo "=== utsrelease"
           cat include/generated/utsrelease.h 2>/dev/null || true
-          echo "=== olddefconfig 对真机 config 的改动（关键！）"
-          python3 scripts/diffconfig "$GITHUB_WORKSPACE/kernel-real.config" .config 2>&1 | head -80 || true
-          echo "=== struct module 相关项复核"
-          for k in CONFIG_MODULE_UNLOAD CONFIG_KALLSYMS CONFIG_KALLSYMS_ALL CONFIG_TRACEPOINTS \
-                   CONFIG_EVENT_TRACING CONFIG_JUMP_LABEL CONFIG_LIVEPATCH CONFIG_MODULE_SIG \
-                   CONFIG_MODULE_UNLOAD_TAINT_TRACKING CONFIG_FUNCTION_TRACER; do
-            printf '  %-42s ' "$k"; grep -h "^#define $k " include/generated/autoconf.h 2>/dev/null || echo "(未定义)"
-          done
 
       - name: 手工 kbuild 编模块
         run: |
