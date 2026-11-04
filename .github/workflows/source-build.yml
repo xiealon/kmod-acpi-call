@@ -82,6 +82,10 @@ jobs:
             echo "=== 用内核 x86_64_defconfig 作基底（它给出的 struct module 是 1216，与真机一致）"
             make ARCH=x86_64 defconfig 2>&1 | tail -5
           fi
+          echo "=== 精简：去掉模块里真机内核不支持的段（jump label / patchable entry / ORC）"
+          ./scripts/config --file .config \
+            -d JUMP_LABEL -d FUNCTION_TRACER -d UNWINDER_ORC \
+            -e UNWINDER_FRAME_POINTER 2>&1 | tail -3 || true
           echo "=== olddefconfig"
           make ARCH=x86_64 olddefconfig 2>&1 | tail -10
           echo "=== modules_prepare"
