@@ -1,0 +1,96 @@
+name: build kmod-acpi-call
+
+# 用 ImmortalWrt 25.12.2 官方 SDK 编译 kmod-acpi-call。
+# SDK 与真机内核（6.12.103）出自同一份源码 + 同一套 config，
+# vermagic 与 Module.symvers 天然对齐，产物可直接装到真机。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'package/kernel/acpi-call/**'
+      - '.github/workflows/build.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: 环境准备
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zstd build-essential libncurses-dev rsync gawk gettext unzip file wget python3
+
+      - name: 下载并解压 SDK 25.12.2
+        run: |
+          set -eu
+          F=immortalwrt-sdk-25.12.2-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+          URL="https://downloads.immortalwrt.org/releases/25.12.2/targets/x86/64/${F}"
+          echo "SDK: $URL"
+          wget -q "$URL" -O /tmp/sdk.tar.zst
+          ls -l /tmp/sdk.tar.zst
+          mkdir -p /opt/sdk
+          tar --zstd -xf /tmp/sdk.tar.zst -C /opt/sdk
+          SDK_DIR=$(ls -d /opt/sdk/*/ | head -n1)
+          echo "SDK_DIR=$SDK_DIR" >> "$GITHUB_ENV"
+          echo "解压到 $SDK_DIR"
+          ls "$SDK_DIR"
+
+      - name: 探测 SDK 内核构建环境
+        run: |
+          set -u
+          cd "$SDK_DIR"
+          echo "=== build_dir"
+          ls build_dir/ 2>/dev/null || echo "(无 build_dir)"
+          echo "=== 内核源码目录"
+          ls -d build_dir/target-*/linux-*/*/ 2>/dev/null || echo "(无内核源码目录)"
+          echo "=== Module.symvers"
+          find build_dir staging_dir -maxdepth 6 -name 'Module.symvers' 2>/dev/null | head -5
+          echo "=== autoconf.h"
+          find build_dir staging_dir -maxdepth 7 -name 'autoconf.h' 2>/dev/null | head -5
+          echo "=== include/kernel"
+          ls -d staging_dir/target-*/usr/include 2>/dev/null || true
+
+      - name: 注入包并编译
+        run: |
+          set -u
+          cd "$SDK_DIR"
+          mkdir -p package/kernel
+          cp -rv "$GITHUB_WORKSPACE/package/kernel/acpi-call" package/kernel/
+          echo "=== 包内容"
+          ls -l package/kernel/acpi-call package/kernel/acpi-call/src
+          make defconfig
+          echo "=== 开始编译 kmod-acpi-call"
+          make package/kernel/acpi-call/compile V=s -j"$(nproc)" 2>&1 | tail -250
+
+      - name: 收集产物
+        run: |
+          set -u
+          cd "$SDK_DIR"
+          echo "=== bin/packages 下的 apk"
+          find bin -name '*.apk' 2>/dev/null | head -20
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          find . -name '*acpi-call*.apk' -o -name '*acpi-call*.ipk' 2>/dev/null | while IFS= read -r f; do
+            echo "找到: $f"
+            cp -v "$f" "$GITHUB_WORKSPACE/out"/ || true
+          done
+          echo "=== 产物清单"
+          ls -l "$GITHUB_WORKSPACE/out" || true
+          echo "=== vermagic 核对"
+          find "$GITHUB_WORKSPACE/out" -name '*.apk' | head -1 | while IFS= read -r a; do
+            mkdir -p /tmp/x && tar -xzf "$a" -C /tmp/x 2>/dev/null || true
+            find /tmp/x -name '*.ko' -exec modinfo {} \; 2>/dev/null | grep -E 'vermagic|srcversion' || true
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kmod-acpi-call
+          path: ${{ github.workspace }}/out/*
+          if-no-files-found: warn
