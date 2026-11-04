@@ -46,3 +46,25 @@ modprobe acpi_call
 ## 来源
 
 基于 Michal Kottman 的 acpi_call，适配 Linux 6.x 的 `proc_ops` 接口。
+
+## 许可
+
+`GPL-2.0-only`，全文见仓库根目录 [`LICENSE`](LICENSE)。
+
+| 为什么不能换成别的 |
+|---|
+| 内核模块基于 Linux 内核头文件与 **GPL-only 符号**构建，法律上属内核衍生作品，**只能是 GPL-2.0** |
+| 原始 `acpi_call` 由 Michal Kottman 于 2010 年发布（源码内 `MODULE_LICENSE("GPL")`），本仓库是它的 Linux 6.x `proc_ops` 适配版 |
+| GPL-2.0 与 GPL-3.0 **不兼容**，不能升版 |
+
+每个源文件首行与 OpenWrt `Makefile` 的 `PKG_LICENSE` 均已标注 `GPL-2.0-only`。
+
+## 内核版本绑定
+
+`kmod-acpi-call_*.apk` 里带 `kernel=6.12.103~<32 位内核配置哈希>` 依赖：
+
+- 只能装进**内核配置哈希相同**的固件
+- 换内核配置（哪怕改一个选项）哈希就变，模块装不上
+- 与 [immortalwrt-artifacts](https://github.com/xiealon/immortalwrt-artifacts) 的 `v25.12.2-*-r2` 三个 tag 同源
+
+所以本仓库产物**不适合通用分发**，只在本套固件上使用。
