@@ -79,11 +79,16 @@ jobs:
           set -u
           SRC="$GITHUB_WORKSPACE/src"
           cd "$LINUX"
-          echo "=== 基底 x86_64_defconfig（它给出的 struct module 是 1216，与真机一致）"
+          echo "=== 基底 x86_64_defconfig"
           make ARCH=x86_64 defconfig 2>&1 | tail -3
-          echo "=== 只关 FTRACE_MCOUNT_USE_PATCHABLE_FUNCTION_ENTRY"
-          echo "    真机 ko 用 __mcount_loc（recordmcount），不用 __patchable_function_entries"
-          ./scripts/config --file .config -d FTRACE_MCOUNT_USE_PATCHABLE_FUNCTION_ENTRY 2>&1 | tail -2 || true
+          cp .config /tmp/k.base
+          echo "  基底项数 $(grep -cE '^CONFIG_[A-Za-z0-9_]+=' /tmp/k.base)"
+          echo "=== 官方增量追加覆盖（后出现的同名项生效）"
+          cat "$SRC/target/linux/generic/config-6.12" \
+              "$SRC/target/linux/x86/config-6.12" \
+              "$SRC/target/linux/x86/64/config-6.12" >> /tmp/k.base
+          echo "  拼接后行数 $(wc -l < /tmp/k.base)"
+          cp /tmp/k.base .config
           echo "=== olddefconfig 补齐"
           make ARCH=x86_64 olddefconfig 2>&1 | tail -10
           echo "=== modules_prepare"
@@ -92,8 +97,11 @@ jobs:
           echo "=== autoconf 关键项"
           for k in CONFIG_MITIGATION_RETHUNK CONFIG_MITIGATION_SLS CONFIG_X86_KERNEL_IBT \
                    CONFIG_JUMP_LABEL CONFIG_FUNCTION_TRACER CONFIG_FTRACE_MCOUNT_RECORD \
-                   CONFIG_HAVE_PATCHABLE_FUNCTION_ENTRY CONFIG_MODULE_UNLOAD \
-                   CONFIG_DEBUG_INFO_BTF_MODULES CONFIG_MODVERSIONS CONFIG_MITIGATION_RETPOLINE; do
+                   CONFIG_FTRACE_MCOUNT_USE_PATCHABLE_FUNCTION_ENTRY \
+                   CONFIG_UNWINDER_ORC CONFIG_UNWINDER_FRAME_POINTER \
+                   CONFIG_TRACEPOINTS CONFIG_EVENT_TRACING CONFIG_KALLSYMS_ALL \
+                   CONFIG_LIVEPATCH CONFIG_MODULE_SIG CONFIG_MODULE_UNLOAD \
+                   CONFIG_DEBUG_INFO_BTF CONFIG_DEBUG_INFO_BTF_MODULES CONFIG_MODVERSIONS; do
             printf '  %-46s ' "$k"
             grep -h "^#define $k " include/generated/autoconf.h 2>/dev/null || echo "(未定义)"
           done
