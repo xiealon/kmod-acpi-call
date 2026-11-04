@@ -79,27 +79,12 @@ jobs:
           set -u
           SRC="$GITHUB_WORKSPACE/src"
           cd "$LINUX"
-          echo "=== 基底 x86_64_defconfig"
-          make ARCH=x86_64 defconfig 2>&1 | tail -3
-          cp .config /tmp/k.base
-          echo "=== OpenWrt 官方增量配置（真机内核就是这套生成的）"
+          echo "=== 用 OpenWrt 官方三份配置直接拼成 .config（真机内核就是这套）"
           cat "$SRC/target/linux/generic/config-6.12" \
               "$SRC/target/linux/x86/config-6.12" \
-              "$SRC/target/linux/x86/64/config-6.12" > /tmp/k.inc
-          echo "  增量行数 $(wc -l < /tmp/k.inc)"
-          echo "=== kconfig.pl 合并"
-          perl "$SRC/scripts/kconfig.pl" '+' /tmp/k.base /tmp/k.inc > /tmp/k.merged 2>/tmp/k.err
-          echo "  perl rc=$?"
-          head -5 /tmp/k.err 2>/dev/null || true
-          N=$(grep -cE '^CONFIG_[A-Za-z0-9_]+=' /tmp/k.merged || true)
-          echo "  合并后项数 $N"
-          if [ "${N:-0}" -lt 3000 ]; then
-            echo "::warning::kconfig.pl 结果异常，退回 defconfig"
-            cp /tmp/k.base .config
-          else
-            cp /tmp/k.merged .config
-          fi
-          echo "=== olddefconfig"
+              "$SRC/target/linux/x86/64/config-6.12" > .config
+          echo "  拼接行数 $(wc -l < .config)，项数 $(grep -cE '^CONFIG_[A-Za-z0-9_]+=' .config)"
+          echo "=== olddefconfig 补齐"
           make ARCH=x86_64 olddefconfig 2>&1 | tail -10
           echo "=== modules_prepare"
           make ARCH=x86_64 modules_prepare -j"$(nproc)" 2>&1 | tail -15
