@@ -80,12 +80,16 @@ jobs:
             echo "找到: $f"
             cp -v "$f" "$GITHUB_WORKSPACE/out"/ || true
           done
+          echo "=== 裸 ko（用于直接 insmod 验证）"
+          find . -name 'acpi_call.ko' 2>/dev/null | while IFS= read -r f; do
+            echo "找到 ko: $f  ($(stat -c%s "$f") B)"
+            cp -v "$f" "$GITHUB_WORKSPACE/out"/ || true
+          done
           echo "=== 产物清单"
           ls -l "$GITHUB_WORKSPACE/out" || true
-          echo "=== vermagic 核对"
-          find "$GITHUB_WORKSPACE/out" -name '*.apk' | head -1 | while IFS= read -r a; do
-            mkdir -p /tmp/x && tar -xzf "$a" -C /tmp/x 2>/dev/null || true
-            find /tmp/x -name '*.ko' -exec modinfo {} \; 2>/dev/null | grep -E 'vermagic|srcversion' || true
+          echo "=== vermagic / 依赖核对"
+          find "$GITHUB_WORKSPACE/out" -name '*.ko' | while IFS= read -r k; do
+            modinfo "$k" | grep -E 'vermagic|depends|name|srcversion' || true
           done
 
       - uses: actions/upload-artifact@v4
