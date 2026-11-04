@@ -82,9 +82,6 @@ jobs:
             echo "=== 用内核 x86_64_defconfig 作基底（它给出的 struct module 是 1216，与真机一致）"
             make ARCH=x86_64 defconfig 2>&1 | tail -5
           fi
-          echo "=== 关掉真机内核没开的缓解项（否则模块引用 __x86_return_thunk 会加载失败）"
-          ./scripts/config --file .config \
-            -d MITIGATION_RETHUNK -d MITIGATION_SLS -d X86_KERNEL_IBT 2>&1 | tail -3 || true
           echo "=== olddefconfig"
           make ARCH=x86_64 olddefconfig 2>&1 | tail -10
           echo "=== modules_prepare"
