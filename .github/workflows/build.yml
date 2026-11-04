@@ -1,20 +1,23 @@
 name: build kmod-acpi-call
 
-# 用 ImmortalWrt 25.12.2 SDK 的内核源码树，但把内核 .config 换成真机
-# /proc/config.gz 那一份（kernel-real.config），保证 autoconf.h / ftrace /
-# BTF 等编译条件与真机内核完全一致。
+# 用 ImmortalWrt 25.12.2 官方 SDK 编译 kmod-acpi-call，
+# 同时编一个 10 行的 tiny 模块做对照，判断 insmod 的
+# "Invalid relocation target" 是环境问题还是 acpi_call.c 自身问题。
 
 on:
   workflow_dispatch:
   push:
     branches: [main]
     paths:
-      - 'package/kernel/acpi-call/**'
-      - 'kernel-real.config'
+      - 'package/**'
       - '.github/workflows/build.yml'
 
 permissions:
   contents: write
+
+concurrency:
+  group: build-kmod
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -33,7 +36,7 @@ jobs:
           set -eu
           F=immortalwrt-sdk-25.12.2-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
           URL="https://downloads.immortalwrt.org/releases/25.12.2/targets/x86/64/${F}"
-          wget -q "$URL" -O /tmp/sdk.tar.zst
+          wget -q --timeout=60 --tries=3 "$URL" -O /tmp/sdk.tar.zst
           ls -l /tmp/sdk.tar.zst
           mkdir -p /opt/sdk
           tar --zstd -xf /tmp/sdk.tar.zst -C /opt/sdk
@@ -41,83 +44,51 @@ jobs:
           echo "SDK_DIR=$SDK_DIR" >> "$GITHUB_ENV"
           echo "解压到 $SDK_DIR"
 
-      - name: 定位内核源码树
-        run: |
-          set -u
-          cd "$SDK_DIR"
-          echo "=== build_dir"
-          ls build_dir/ 2>/dev/null || echo "(无)"
-          LINUX=$(ls -d build_dir/target-*/linux-*/linux-*/ 2>/dev/null | head -n1)
-          if [ -z "$LINUX" ]; then
-            echo "::error::SDK 里没有内核源码树"
-            find build_dir -maxdepth 3 -type d | head -40
-            exit 1
-          fi
-          echo "LINUX=${LINUX%/}" >> "$GITHUB_ENV"
-          echo "内核源码: $LINUX"
-          ls "$LINUX" | head -20
-          echo "=== 原 config 摘要"
-          grep -E 'CONFIG_FUNCTION_TRACER|CONFIG_DYNAMIC_FTRACE|CONFIG_DEBUG_INFO_BTF_MODULES|CONFIG_SMP|CONFIG_PREEMPT_NONE|CONFIG_MODVERSIONS' "$LINUX/.config" 2>/dev/null || echo "(无 .config)"
-
-      - name: 换用真机内核配置
-        run: |
-          set -u
-          cd "$SDK_DIR"
-          cp -v "$GITHUB_WORKSPACE/kernel-real.config" "$LINUX/.config"
-          echo "=== 真机 config 行数: $(wc -l < "$LINUX/.config")"
-          export PATH="$SDK_DIR/staging_dir/toolchain-x86_64_gcc-14.3.0_musl/bin:$PATH"
-          echo "=== olddefconfig"
-          make -C "$LINUX" ARCH=x86_64 olddefconfig 2>&1 | tail -15
-          echo "=== modules_prepare"
-          make -C "$LINUX" ARCH=x86_64 prepare modules_prepare 2>&1 | tail -25
-          echo "=== 生成的 autoconf 关键项"
-          for k in CONFIG_FUNCTION_TRACER CONFIG_DYNAMIC_FTRACE CONFIG_DEBUG_INFO_BTF_MODULES \
-                   CONFIG_SMP CONFIG_PREEMPT_NONE CONFIG_MODVERSIONS CONFIG_X86_KERNEL_IBT; do
-            echo -n "  $k = "
-            grep -h "^#define $k " "$LINUX/include/generated/autoconf.h" 2>/dev/null || echo "(未定义)"
-          done
-          echo "=== 内核版本"
-          head -5 "$LINUX/Makefile" | grep -E 'VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION'
-
       - name: 注入包并编译
         run: |
           set -u
           cd "$SDK_DIR"
           mkdir -p package/kernel
           cp -rv "$GITHUB_WORKSPACE/package/kernel/acpi-call" package/kernel/
+          cp -rv "$GITHUB_WORKSPACE/package/kernel/tiny" package/kernel/
           make defconfig
-          export PATH="$SDK_DIR/staging_dir/toolchain-x86_64_gcc-14.3.0_musl/bin:$PATH"
-          echo "=== 编译 kmod-acpi-call"
-          make package/kernel/acpi-call/compile V=s -j"$(nproc)" 2>&1 | tail -120
+          echo "=== 编译 tiny（对照）"
+          make package/kernel/tiny/compile V=s -j"$(nproc)" 2>&1 | tail -40
+          echo "=== 编译 acpi-call"
+          make package/kernel/acpi-call/compile V=s -j"$(nproc)" 2>&1 | tail -60
 
       - name: 收集产物
         run: |
           set -u
           cd "$SDK_DIR"
           mkdir -p "$GITHUB_WORKSPACE/out"
-          find . -name '*acpi-call*.apk' 2>/dev/null | while IFS= read -r f; do
+          for n in acpi_call tiny; do
+            find . -name "$n.ko" 2>/dev/null | while IFS= read -r f; do
+              echo "$n.ko: $f ($(stat -c%s "$f") B)"
+              cp -v "$f" "$GITHUB_WORKSPACE/out"/ || true
+            done
+          done
+          find . -name '*acpi-call*.apk' -o -name '*tiny*.apk' 2>/dev/null | while IFS= read -r f; do
             cp -v "$f" "$GITHUB_WORKSPACE/out"/ || true
           done
-          find . -name 'acpi_call.ko' 2>/dev/null | while IFS= read -r f; do
-            echo "ko: $f ($(stat -c%s "$f") B)"
-            cp -v "$f" "$GITHUB_WORKSPACE/out"/ || true
-          done
-          echo "=== 产物"
+          echo "=== 产物清单"
           ls -l "$GITHUB_WORKSPACE/out" || true
-          echo "=== vermagic"
+          echo "=== vermagic 对照"
           for k in "$GITHUB_WORKSPACE"/out/*.ko; do
             [ -e "$k" ] || continue
+            echo "--- $(basename "$k")"
             modinfo "$k" | grep -E 'vermagic|depends|name' || true
           done
-          echo "=== 段表（确认 __mcount_loc / BTF 是否出现）"
+          echo "=== 段表对照"
           for k in "$GITHUB_WORKSPACE"/out/*.ko; do
             [ -e "$k" ] || continue
-            readelf -S "$k" | grep -E 'mcount|BTF|debug_info|note.gnu' || true
+            echo "--- $(basename "$k")"
+            readelf -S "$k" | grep -E 'mcount|BTF|debug_info|note.gnu|\.text ' || true
           done
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: kmod-acpi-call-realcfg
+          name: kmod-output
           path: ${{ github.workspace }}/out/*
           if-no-files-found: warn
